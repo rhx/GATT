@@ -97,6 +97,18 @@ public final class GATTCentral <HostController: BluetoothHostControllerInterface
             else { throw CentralError.unknownPeripheral }
         // log
         self.log(scanData.peripheral, "Open connection (\(report.addressType))")
+        // stop scanning, because a controller will not open a connection while
+        // a scan is in progress.  A scan stream disables scanning only once its
+        // polling loop observes cancellation, which may be long after the
+        // caller stopped it, so disable scanning here and wait for the
+        // controller to confirm.
+        do {
+            try await hostController.deviceRequest(
+                HCILESetScanEnable(isEnabled: false, filterDuplicates: false),
+                timeout: .default
+            )
+        }
+        catch HCIError.commandDisallowed { /* already disabled */ }
         // load cache device address
         let localAddress = try await storage.readAddress(hostController)
         // open socket
