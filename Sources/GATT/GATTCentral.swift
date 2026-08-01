@@ -92,11 +92,48 @@ public final class GATTCentral <HostController: BluetoothHostControllerInterface
     }
     
     public func connect(to peripheral: Peripheral) async throws {
-        // get scan data (Bluetooth address) for new connection
-        guard let (scanData, report) = await self.storage.scanData[peripheral]
-            else { throw CentralError.unknownPeripheral }
+        try await connect(to: peripheral, type: .public)
+    }
+
+    /// Connects to a peripheral, which need not have been scanned for.
+    ///
+    /// A peripheral is identified by its Bluetooth address, so a caller that
+    /// already knows the address can connect without scanning.  This matters
+    /// because a device may advertise rarely, or stop advertising altogether,
+    /// while still accepting connections.
+    ///
+    /// - Parameters:
+    ///   - peripheral: The peripheral to connect to.
+    ///   - type: Address type to assume when the peripheral has not been scanned.
+    public func connect(
+        to peripheral: Peripheral,
+        type: LowEnergyAddressType
+    ) async throws {
+        // use scan data (Bluetooth address) when the peripheral was scanned for
+        guard let (scanData, report) = await self.storage.scanData[peripheral] else {
+            try await connect(to: peripheral, address: peripheral.id, type: type)
+            return
+        }
         // log
         self.log(scanData.peripheral, "Open connection (\(report.addressType))")
+        try await connect(
+            to: peripheral,
+            address: report.address,
+            type: report.addressType
+        )
+    }
+
+    /// Opens a connection to a peripheral at a known Bluetooth address.
+    ///
+    /// - Parameters:
+    ///   - peripheral: The peripheral the connection belongs to.
+    ///   - address: Bluetooth address to connect to.
+    ///   - type: Whether the address is public or random.
+    private func connect(
+        to peripheral: Peripheral,
+        address: BluetoothAddress,
+        type: LowEnergyAddressType
+    ) async throws {
         // stop scanning, because a controller will not open a connection while
         // a scan is in progress.  A scan stream disables scanning only once its
         // polling loop observes cancellation, which may be long after the
@@ -114,7 +151,8 @@ public final class GATTCentral <HostController: BluetoothHostControllerInterface
         // open socket
         let socket = try Socket.lowEnergyClient(
             address: localAddress,
-            destination: report
+            destination: address,
+            isRandom: type == .random
         )
         let connection = await GATTClientConnection(
             peripheral: peripheral,
@@ -248,10 +286,8 @@ public final class GATTCentral <HostController: BluetoothHostControllerInterface
     // MARK: - Private Methods
     
     private func connection(for peripheral: Peripheral) async throws -> GATTClientConnection<Socket> {
-        
-        guard await storage.scanData.keys.contains(peripheral)
-            else { throw CentralError.unknownPeripheral }
-        
+
+        // a connected peripheral is addressable whether or not it was scanned for
         guard let (connection, _) = await storage.connections[peripheral]
             else { throw CentralError.disconnected }
         
