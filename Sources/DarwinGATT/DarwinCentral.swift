@@ -265,10 +265,15 @@ public final class DarwinCentral: CentralManager, ObservableObject, @unchecked S
     public func notify(
         for characteristic: DarwinCentral.Characteristic
     ) async throws -> AsyncCentralNotifications<DarwinCentral> {
-        // enable notifications
-        try await self.setNotification(true, for: characteristic)
-        // central
-        return AsyncCentralNotifications(onTermination: { [unowned self] in
+        // identifies this subscription, so that tearing down an earlier stream
+        // for the same characteristic cannot discard the stream installed by a
+        // later subscription
+        let subscription = NotificationSubscription()
+        // store the stream before enabling notifications, because a peripheral
+        // may send its first value as soon as the descriptor write completes.
+        // Both this registration and the notification state change run on the
+        // same serial queue, so the stream is always in place first.
+        let stream = AsyncCentralNotifications<DarwinCentral>(onTermination: { [unowned self] in
             Task {
                 // disable notifications
                 do { try await self.setNotification(false, for: characteristic) }
@@ -278,9 +283,14 @@ public final class DarwinCentral: CentralManager, ObservableObject, @unchecked S
                 catch {
                     self.log?("Unable to stop notifications for \(characteristic.uuid). \(error.localizedDescription)")
                 }
-                // remove notification stream
+                // remove notification stream, unless a later subscription
+                // has already replaced it
                 self.async { [unowned self] in
                     let context = self.continuation(for: characteristic.peripheral)
+                    guard context.notificationSubscription[characteristic.id] === subscription else {
+                        return
+                    }
+                    context.notificationSubscription[characteristic.id] = nil
                     context.notificationStream[characteristic.id] = nil
                 }
             }
@@ -288,9 +298,19 @@ public final class DarwinCentral: CentralManager, ObservableObject, @unchecked S
             self.async { [unowned self] in
                 // store continuation
                 let context = self.continuation(for: characteristic.peripheral)
+                context.notificationSubscription[characteristic.id] = subscription
                 context.notificationStream[characteristic.id] = continuation
             }
         })
+        // enable notifications
+        do {
+            try await self.setNotification(true, for: characteristic)
+        }
+        catch {
+            stream.stop()
+            throw error
+        }
+        return stream
     }
     
     public func maximumTransmissionUnit(for peripheral: Peripheral) async throws -> MaximumTransmissionUnit {
@@ -540,10 +560,17 @@ private extension DarwinCentral {
         fileprivate init() { }
     }
     
+    /// Identity of the subscription that installed a notification stream.
+    final class NotificationSubscription {
+
+        fileprivate init() { }
+    }
+
     final class PeripheralContinuationContext {
-        
+
         var operations: Queue<QueuedOperation>
         var notificationStream = [AttributeID: AsyncIndefiniteStream<Data>.Continuation]()
+        var notificationSubscription = [AttributeID: NotificationSubscription]()
         var readRSSI: Operation.ReadRSSI?
         
         fileprivate init(_ central: DarwinCentral) {
@@ -570,6 +597,7 @@ fileprivate extension DarwinCentral.PeripheralContinuationContext {
             $0.finish(throwing: error)
         }
         notificationStream.removeAll(keepingCapacity: true)
+        notificationSubscription.removeAll(keepingCapacity: true)
     }
 }
 
